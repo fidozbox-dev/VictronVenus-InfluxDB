@@ -20,7 +20,7 @@ reg_block = {}
 logger = logging.getLogger('victron')
 
 
-async def write_to_influx(dbhost, dbport, mbmeters, dbname='victron'):
+async def write_to_influx(dbhost, dbport, dbname='victron'):
     global client
     global datapoint
     global reg_block
@@ -213,7 +213,6 @@ if __name__ == '__main__':
     print('Starting up Victron Venus monitoring')
     print(f'Connecting to Victron Venus {args.venus} on port {args.port} using unitid {args.unitid}')
     print(f'Writing data to influxDb {args.influxdb} on port {args.influxport}')
-    print(f'Number of meters is {args.meters}')
     client = ModbusClient(args.venus, port=args.port, unit_id=args.unitid, auto_open=True)
     logger.debug('Running eventloop')
-    asyncio.get_event_loop().run_until_complete(write_to_influx(args.influxdb, args.influxport, args.meters))
+    asyncio.get_event_loop().run_until_complete(write_to_influx(args.influxdb, args.influxport))
