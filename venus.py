@@ -192,7 +192,7 @@ async def write_to_influx(dbhost, dbport, dbname='victron'):
         except Exception as e:
             logger.error(f'Unhandled exception: {e}')
 
-        await asyncio.sleep(5)
+        await asyncio.sleep(1)
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
