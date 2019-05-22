@@ -39,7 +39,7 @@ async def write_to_influx(dbhost, dbport, dbname='victron'):
     while True:
         try:
             reg_block = {}
-            reg_block = client.read_holding_registers(40879, 27)
+            reg_block = client.read_holding_registers(800, 27)
             if reg_block:
                 datapoint = {
                     'measurement': 'Victron',
@@ -130,7 +130,7 @@ async def write_to_influx(dbhost, dbport, dbname='victron'):
                     logger.error('Timeout during send or receive operation!')
 
             reg_block = {}
-            reg_block = client.read_holding_registers(40839, 7)
+            reg_block = client.read_holding_registers(840, 7)
             if reg_block:
                 datapoint = {
                     'measurement': 'Victron',
@@ -159,12 +159,12 @@ async def write_to_influx(dbhost, dbport, dbname='victron'):
                 # Battery Power
                 logger.debug(f'Block2: {str(reg_block[2])}')
                 scalefactor = 1
-                datapoint['fields']['Battery Current'] = trunc_float(np.int16(reg_block[2]) * scalefactor)
+                datapoint['fields']['Battery Power'] = trunc_float(np.int16(reg_block[2]) * scalefactor)
 
                 # Battery State of Charge
                 logger.debug(f'Block3: {str(reg_block[3])}')
                 scalefactor = 1
-                datapoint['fields']['Battery Current'] = trunc_float(reg_block[3] * scalefactor)
+                datapoint['fields']['Battery State of Charge'] = trunc_float(reg_block[3] * scalefactor)
 
                 
                 datapoint['time'] = str(datetime.datetime.utcnow().replace(tzinfo=datetime.timezone.utc).isoformat())
