@@ -1,218 +1,196 @@
 #!/usr/bin/env python3
+"""
+Victron Venus to InfluxDB Bridge
+Collects data from Victron Venus device via ModbusTCP and stores it in InfluxDB.
+"""
+
 import argparse
 import datetime
 import logging
+from typing import Dict, Optional
+import asyncio
 import numpy as np
-
 from aiohttp import ClientConnectionError
 from pyModbusTCP.client import ModbusClient
-from pymodbus.constants import Endian
-from pymodbus.payload import BinaryPayloadDecoder
-import asyncio
 from aioinflux import InfluxDBClient, InfluxDBWriteError
 
-datapoint = {
-    'measurement': 'Victron',
-    'tags': {},
-    'fields': {}
+# Constants for Modbus registers
+MODBUS_REGISTERS = {
+    'SYSTEM_INFO': {'start': 800, 'count': 27},
+    'BATTERY_INFO': {'start': 840, 'count': 7}
 }
-reg_block = {}
-logger = logging.getLogger('victron')
 
+# Constants for scaling factors
+SCALE_FACTORS = {
+    'battery_voltage': 0.1,
+    'battery_current': 0.1,
+    'battery_power': 1,
+    'battery_soc': 1,
+    'battery_state': 1,
+    'battery_ttg': 1,
+    'ac_consumption': 1,
+    'grid': 1,
+    'pv_input': 1,
+    'pv_output': 1,
+    'active_input': 1
+}
 
-async def write_to_influx(dbhost, dbport, dbname='victron'):
-    global client
-    global datapoint
-    global reg_block
+class VictronMonitor:
+    """Main class for handling Victron Venus monitoring"""
+    
+    def __init__(self, venus_host: str, modbus_port: int, unit_id: int):
+        """Initialize VictronMonitor with connection parameters"""
+        self.logger = logging.getLogger('victron')
+        self.client = ModbusClient(
+            host=venus_host,
+            port=modbus_port,
+            unit_id=unit_id,
+            auto_open=True,
+            debug=True
+        )
 
-    def trunc_float(floatval):
-        return float('%.2f' % floatval)
+    async def read_modbus_registers(self, start: int, count: int) -> Optional[list]:
+        """Read Modbus registers with error handling"""
+        try:
+            reg_block = self.client.read_holding_registers(start, count)
+            if not reg_block:
+                self._handle_modbus_error()
+            return reg_block
+        except Exception as e:
+            self.logger.error(f'Error reading Modbus registers: {e}')
+            return None
 
-    try:
-        solar_client = InfluxDBClient(host=dbhost, port=dbport, db=dbname)
-        await solar_client.create_database(db=dbname)
-    except ClientConnectionError as e:
-        logger.error(f'Error during connection to InfluxDb {dbhost}: {e}')
+    def _handle_modbus_error(self):
+        """Handle Modbus communication errors"""
+        error_code = self.client.last_error()
+        if error_code == 2:
+            self.logger.error(f'Failed to connect to Victron Host {self.client.host()}!')
+        elif error_code in (3, 4):
+            self.logger.error('Send or receive error!')
+        elif error_code == 5:
+            self.logger.error('Timeout during send or receive operation!')
+
+    def process_system_data(self, reg_block: list) -> Dict:
+        """Process system-related register data"""
+        return {
+            'AC Consumption L1': reg_block[17] * SCALE_FACTORS['ac_consumption'],
+            'AC Consumption L2': reg_block[18] * SCALE_FACTORS['ac_consumption'],
+            'AC Consumption L3': reg_block[19] * SCALE_FACTORS['ac_consumption'],
+            'Grid L1': np.int16(reg_block[20]) * SCALE_FACTORS['grid'],
+            'Grid L2': np.int16(reg_block[21]) * SCALE_FACTORS['grid'],
+            'Grid L3': np.int16(reg_block[22]) * SCALE_FACTORS['grid'],
+            'PV - AC-coupled on input L1': reg_block[11] * SCALE_FACTORS['pv_input'],
+            'PV - AC-coupled on input L2': reg_block[12] * SCALE_FACTORS['pv_input'],
+            'PV - AC-coupled on input L3': reg_block[13] * SCALE_FACTORS['pv_input'],
+            'PV - AC-coupled on output L1': reg_block[8] * SCALE_FACTORS['pv_output'],
+            'PV - AC-coupled on output L2': reg_block[9] * SCALE_FACTORS['pv_output'],
+            'PV - AC-coupled on output L3': reg_block[10] * SCALE_FACTORS['pv_output'],
+            'Active input source': reg_block[26] * SCALE_FACTORS['active_input']
+        }
+
+    def process_battery_data(self, reg_block: list) -> Dict:
+        """Process battery-related register data"""
+        return {
+            'Battery Voltage': reg_block[0] * SCALE_FACTORS['battery_voltage'],
+            'Battery Current': np.int16(reg_block[1]) * SCALE_FACTORS['battery_current'],
+            'Battery Power': np.int16(reg_block[2]) * SCALE_FACTORS['battery_power'],
+            'Battery State of Charge': reg_block[3] * SCALE_FACTORS['battery_soc'],
+            'Battery State': reg_block[4] * SCALE_FACTORS['battery_state'],
+            'Battery Time to Go': reg_block[6] * SCALE_FACTORS['battery_ttg']
+        }
+
+    @staticmethod
+    def create_datapoint(fields: Dict) -> Dict:
+        """Create an InfluxDB datapoint with the current timestamp"""
+        return {
+            'measurement': 'Victron',
+            'tags': {'system': 1},
+            'fields': {k: float('%.2f' % v) for k, v in fields.items()},
+            'time': datetime.datetime.utcnow().replace(
+                tzinfo=datetime.timezone.utc
+            ).isoformat()
+        }
+
+class InfluxDBWriter:
+    """Handles InfluxDB connections and writes"""
+    
+    def __init__(self, host: str, port: int, database: str = 'victron'):
+        self.host = host
+        self.port = port
+        self.database = database
+        self.logger = logging.getLogger('victron')
+
+    async def initialize(self) -> Optional[InfluxDBClient]:
+        """Initialize InfluxDB connection"""
+        try:
+            client = InfluxDBClient(
+                host=self.host,
+                port=self.port,
+                db=self.database
+            )
+            await client.create_database(db=self.database)
+            self.logger.info('Database opened and initialized')
+            return client
+        except ClientConnectionError as e:
+            self.logger.error(f'Error during connection to InfluxDB {self.host}: {e}')
+            return None
+
+async def main_loop(victron: VictronMonitor, influx_writer: InfluxDBWriter):
+    """Main monitoring loop"""
+    influx_client = await influx_writer.initialize()
+    if not influx_client:
         return
 
-    logger.info('Database opened and initialized')
     while True:
         try:
-            reg_block = {}
-            reg_block = client.read_holding_registers(800, 27)
-            if reg_block:
-                datapoint = {
-                    'measurement': 'Victron',
-                    'tags': {},
-                    'fields': {}
-                }
-                # print(reg_block)
-                # reg_block[0] = Serial
-                # reg_block[1] = Serial
-                # reg_block[2] = Serial
-                # reg_block[3] = Serial
-                # reg_block[4] = Serial
-                # reg_block[5] = Serial
-                # reg_block[6] = CCGX Relay 1 State
-                # reg_block[7] = CCGX Relay 2 State
-                # reg_block[8] = PV - AC-coupled on output L1
-                # reg_block[9] = PV - AC-coupled on output L2
-                # reg_block[10] = PV - AC-coupled on output L3
-                # reg_block[11] = PV - AC-coupled on input L1
-                # reg_block[12] = PV - AC-coupled on input L2
-                # reg_block[13] = PV - AC-coupled on input L3
-                # reg_block[14] = PV - AC-coupled on generator L1
-                # reg_block[15] = PV - AC-coupled on generator L2
-                # reg_block[16] = PV - AC-coupled on generator L3
-                # reg_block[17] = AC Consumption L1
-                # reg_block[18] = AC Consumption L2
-                # reg_block[19] = AC Consumption L3
-                # reg_block[20] = Grid L1
-                # reg_block[21] = Grid L2
-                # reg_block[22] = Grid L3
-                # reg_block[23] = Genset L1
-                # reg_block[24] = Genset L2
-                # reg_block[25] = Genset L3
-                # reg_block[26] = Active input source
+            # Read and process system data
+            if system_regs := await victron.read_modbus_registers(
+                MODBUS_REGISTERS['SYSTEM_INFO']['start'],
+                MODBUS_REGISTERS['SYSTEM_INFO']['count']
+            ):
+                system_data = victron.process_system_data(system_regs)
+                await influx_client.write(victron.create_datapoint(system_data))
 
-                
-                datapoint['tags']['system'] = 1
+            # Read and process battery data
+            if battery_regs := await victron.read_modbus_registers(
+                MODBUS_REGISTERS['BATTERY_INFO']['start'],
+                MODBUS_REGISTERS['BATTERY_INFO']['count']
+            ):
+                battery_data = victron.process_battery_data(battery_regs)
+                await influx_client.write(victron.create_datapoint(battery_data))
 
-                # AC Consumption
-                logger.debug(f'Block17: {str(reg_block[17])}')
-                logger.debug(f'Block18: {str(reg_block[18])}')
-                logger.debug(f'Block19: {str(reg_block[19])}')
-                scalefactor = 1
-                datapoint['fields']['AC Consumption L1'] = trunc_float(reg_block[17] * scalefactor)
-                datapoint['fields']['AC Consumption L2'] = trunc_float(reg_block[18] * scalefactor)
-                datapoint['fields']['AC Consumption L3'] = trunc_float(reg_block[19] * scalefactor)
-
-                # Grid
-                logger.debug(f'Block17: {str(reg_block[20])}')
-                logger.debug(f'Block18: {str(reg_block[21])}')
-                logger.debug(f'Block19: {str(reg_block[22])}')
-                scalefactor = 1
-                datapoint['fields']['Grid L1'] = trunc_float(np.int16(reg_block[20]) * scalefactor)
-                datapoint['fields']['Grid L2'] = trunc_float(np.int16(reg_block[21]) * scalefactor)
-                datapoint['fields']['Grid L3'] = trunc_float(np.int16(reg_block[22]) * scalefactor)
-
-                # PV On Input
-                logger.debug(f'Block11: {str(reg_block[11])}')
-                logger.debug(f'Block12: {str(reg_block[12])}')
-                logger.debug(f'Block13: {str(reg_block[13])}')
-                scalefactor = 1
-                datapoint['fields']['PV - AC-coupled on input L1'] = trunc_float(reg_block[11] * scalefactor)
-                datapoint['fields']['PV - AC-coupled on input L2'] = trunc_float(reg_block[12] * scalefactor)
-                datapoint['fields']['PV - AC-coupled on input L3'] = trunc_float(reg_block[13] * scalefactor)
-
-                # PV On Output
-                logger.debug(f'Block8: {str(reg_block[8])}')
-                logger.debug(f'Block9: {str(reg_block[9])}')
-                logger.debug(f'Block10: {str(reg_block[10])}')
-                scalefactor = 1
-                datapoint['fields']['PV - AC-coupled on output L1'] = trunc_float(reg_block[8] * scalefactor)
-                datapoint['fields']['PV - AC-coupled on output L2'] = trunc_float(reg_block[9] * scalefactor)
-                datapoint['fields']['PV - AC-coupled on output L3'] = trunc_float(reg_block[10] * scalefactor)
-
-
-                datapoint['time'] = str(datetime.datetime.utcnow().replace(tzinfo=datetime.timezone.utc).isoformat())
-                logger.debug(f'Writing to Influx: {str(datapoint)}')
-
-                await solar_client.write(datapoint)
-
-            else:
-                # Error during data receive
-                if client.last_error() == 2:
-                    logger.error(f'Failed to connect to Victron Host {client.host()}!')
-                elif client.last_error() == 3 or client.last_error() == 4:
-                    logger.error('Send or receive error!')
-                elif client.last_error() == 5:
-                    logger.error('Timeout during send or receive operation!')
-
-            reg_block = {}
-            reg_block = client.read_holding_registers(840, 7)
-            if reg_block:
-                datapoint = {
-                    'measurement': 'Victron',
-                    'tags': {},
-                    'fields': {}
-                }                    
-                # print(reg_block)
-                # reg_block[0] = Battery Voltage (System)
-                # reg_block[1] = Battery Current (System)
-                # reg_block[2] = Battery Power (System)
-                # reg_block[3] = Battery State of Charge (System)
-                # reg_block[4] = Battery state (System)
-                # reg_block[5] = Battery Consumed Amphours (System)
-                # reg_block[6] = Battery Time to Go (System)
-
-                # Battery Voltage
-                logger.debug(f'Block0: {str(reg_block[0])}')
-                scalefactor = 0.1
-                datapoint['fields']['Battery Voltage'] = trunc_float(reg_block[0] * scalefactor)
-
-                # Battery Current
-                logger.debug(f'Block1: {str(reg_block[1])}')
-                scalefactor = 0.1
-                datapoint['fields']['Battery Current'] = trunc_float(np.int16(reg_block[1]) * scalefactor)
-
-                # Battery Power
-                logger.debug(f'Block2: {str(reg_block[2])}')
-                scalefactor = 1
-                datapoint['fields']['Battery Power'] = trunc_float(np.int16(reg_block[2]) * scalefactor)
-
-                # Battery State of Charge
-                logger.debug(f'Block3: {str(reg_block[3])}')
-                scalefactor = 1
-                datapoint['fields']['Battery State of Charge'] = trunc_float(reg_block[3] * scalefactor)
-
-                
-                datapoint['time'] = str(datetime.datetime.utcnow().replace(tzinfo=datetime.timezone.utc).isoformat())
-                logger.debug(f'Writing to Influx: {str(datapoint)}')
-
-                await solar_client.write(datapoint)
-
-
-            else:
-                # Error during data receive
-                if client.last_error() == 2:
-                    logger.error(f'Failed to connect to Victron Host {client.host()}!')
-                elif client.last_error() == 3 or client.last_error() == 4:
-                    logger.error('Send or receive error!')
-                elif client.last_error() == 5:
-                    logger.error('Timeout during send or receive operation!')               
-                
-                
-                
-                
         except InfluxDBWriteError as e:
-            logger.error(f'Failed to write to InfluxDb: {e}')
-        except IOError as e:
-            logger.error(f'I/O exception during operation: {e}')
+            victron.logger.error(f'Failed to write to InfluxDB: {e}')
         except Exception as e:
-            logger.error(f'Unhandled exception: {e}')
+            victron.logger.error(f'Unhandled exception: {e}')
 
         await asyncio.sleep(1)
 
 if __name__ == '__main__':
-    parser = argparse.ArgumentParser()
-    parser.add_argument('--influxdb', default='localhost')
-    parser.add_argument('--influxport', type=int, default=8086)
-    parser.add_argument('--port', type=int, default=502, help='ModBus TCP port number to use')
-    parser.add_argument('--unitid', type=int, default=100, help='ModBus unit id to use in communication')
-    parser.add_argument('venus', metavar='Venus IP', help='IP address of the Venus Device to monitor')
-    parser.add_argument('--debug', '-d', action='count')
+    parser = argparse.ArgumentParser(description='Victron Venus monitoring tool')
+    parser.add_argument('--influxdb', default='localhost', help='InfluxDB host')
+    parser.add_argument('--influxport', type=int, default=8086, help='InfluxDB port')
+    parser.add_argument('--port', type=int, default=502, help='ModBus TCP port')
+    parser.add_argument('--unitid', type=int, default=100, help='ModBus unit ID')
+    parser.add_argument('venus', metavar='Venus-IP', help='Venus device IP address')
+    parser.add_argument('--debug', '-d', action='count', help='Enable debug logging')
     args = parser.parse_args()
 
+    # Configure logging
     logging.basicConfig()
     if args.debug and args.debug >= 1:
         logging.getLogger('victron').setLevel(logging.DEBUG)
     if args.debug and args.debug == 2:
         logging.getLogger('aioinflux').setLevel(logging.DEBUG)
 
-    print('Starting up Victron Venus monitoring')
-    print(f'Connecting to Victron Venus {args.venus} on port {args.port} using unitid {args.unitid}')
-    print(f'Writing data to influxDb {args.influxdb} on port {args.influxport}')
-    client = ModbusClient(args.venus, port=args.port, unit_id=args.unitid, auto_open=True)
-    logger.debug('Running eventloop')
-    asyncio.get_event_loop().run_until_complete(write_to_influx(args.influxdb, args.influxport))
+    print('Starting Victron Venus monitoring')
+    print(f'Connecting to Victron Venus {args.venus} on port {args.port} using unit ID {args.unitid}')
+    print(f'Writing data to InfluxDB {args.influxdb} on port {args.influxport}')
+
+    # Initialize components and start monitoring
+    victron_monitor = VictronMonitor(args.venus, args.port, args.unitid)
+    influx_writer = InfluxDBWriter(args.influxdb, args.influxport)
+    
+    asyncio.get_event_loop().run_until_complete(
+        main_loop(victron_monitor, influx_writer)
+    )
