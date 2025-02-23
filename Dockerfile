@@ -23,4 +23,4 @@ RUN apk add --no-cache --update alpine-sdk && \
 # Copy application code
 COPY venus.py .
 
-CMD ["python3", "./venus.py", "--influxdb", "$INFLUXDB", "--influxport", "$INFLUXPORT", "--port", "$VENUSPORT", "--unitid", "$UNITID", "$VENUS"]
+CMD python3 ./venus.py --influxdb ${INFLUXDB} --influxport ${INFLUXPORT} --port ${VENUSPORT} --unitid ${UNITID} ${VENUS}
