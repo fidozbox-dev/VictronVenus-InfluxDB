@@ -45,8 +45,7 @@ class VictronMonitor:
             host=venus_host,
             port=modbus_port,
             unit_id=unit_id,
-            auto_open=True,
-            debug=True
+            auto_open=True
         )
 
     async def read_modbus_registers(self, start: int, count: int) -> Optional[list]:
