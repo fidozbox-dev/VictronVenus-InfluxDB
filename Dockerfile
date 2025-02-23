@@ -6,7 +6,7 @@ LABEL maintainer="https://github.com/fidozbox-dev/VictronVenus-InfluxDB"
 # Group ENV statements for better readability
 ENV INFLUXDB=localhost \
     INFLUXPORT=8086 \
-    VENUS=192.168.1.2 \
+    VENUS=192.168.1.112 \
     VENUSPORT=502 \
     UNITID=100
 
