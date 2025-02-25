@@ -80,3 +80,43 @@ Improvements from Original AlexCPU repo:
 3. Make the README more comprehensive and professional
 4. Add better documentation structure
 5. Use Docker multi-stage build for smaller image size
+
+
+```
+## data structure notes :
+
+    # reg_block[0] = Serial
+    # reg_block[1] = Serial
+    # reg_block[2] = Serial
+    # reg_block[3] = Serial
+    # reg_block[4] = Serial
+    # reg_block[5] = Serial
+    # reg_block[6] = CCGX Relay 1 State
+    # reg_block[7] = CCGX Relay 2 State
+    # reg_block[8] = PV - AC-coupled on output L1
+    # reg_block[9] = PV - AC-coupled on output L2
+    # reg_block[10] = PV - AC-coupled on output L3
+    # reg_block[11] = PV - AC-coupled on input L1
+    # reg_block[12] = PV - AC-coupled on input L2
+    # reg_block[13] = PV - AC-coupled on input L3
+    # reg_block[14] = PV - AC-coupled on generator L1
+    # reg_block[15] = PV - AC-coupled on generator L2
+    # reg_block[16] = PV - AC-coupled on generator L3
+    # reg_block[17] = AC Consumption L1
+    # reg_block[18] = AC Consumption L2
+    # reg_block[19] = AC Consumption L3
+    # reg_block[20] = Grid L1
+    # reg_block[21] = Grid L2
+    # reg_block[22] = Grid L3
+    # reg_block[23] = Genset L1
+    # reg_block[24] = Genset L2
+    # reg_block[25] = Genset L3
+    # reg_block[26] = Active input source
+    
+    # reg_block[0] = Battery Voltage (System)
+    # reg_block[1] = Battery Current (System)
+    # reg_block[2] = Battery Power (System)
+    # reg_block[3] = Battery State of Charge (System)
+    # reg_block[4] = Battery state (System)
+    # reg_block[5] = Battery Consumed Amphours (System)
+    # reg_block[6] = Battery Time to Go (System)
