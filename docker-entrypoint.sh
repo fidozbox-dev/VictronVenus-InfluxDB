@@ -9,4 +9,4 @@ exec python venus.py \
     --port       "${VENUSPORT:-502}" \
     --unitid     "${UNITID:-100}" \
     ${DEBUG:+-d} \
-    "${VENUS:-192.168.1.2}"
+    "${VENUS:-192.168.10.112}"
