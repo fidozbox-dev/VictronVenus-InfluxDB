@@ -2,6 +2,10 @@
 """
 Victron Venus to InfluxDB Bridge
 Collects data from Victron Venus device via ModbusTCP and stores it in InfluxDB.
+
+DC-coupled PV (SmartSolar / MPPT chargers) is captured from the system service
+registers 850/851 (/Dc/Pv/Power and /Dc/Pv/Current), which aggregate the output
+of all connected solar chargers. This is separate from the AC-coupled PV fields.
 """
 
 import argparse
@@ -14,10 +18,11 @@ from aiohttp import ClientConnectionError
 from pyModbusTCP.client import ModbusClient
 from aioinflux import InfluxDBClient, InfluxDBWriteError
 
-# Constants for Modbus registers
+# Constants for Modbus registers (com.victronenergy.system, unit-id 100)
 MODBUS_REGISTERS = {
     'SYSTEM_INFO': {'start': 800, 'count': 27},
-    'BATTERY_INFO': {'start': 840, 'count': 7}
+    'BATTERY_INFO': {'start': 840, 'count': 7},
+    'DC_PV_INFO': {'start': 850, 'count': 2},   # SmartSolar / MPPT (DC-coupled)
 }
 
 # Constants for scaling factors
@@ -32,12 +37,14 @@ SCALE_FACTORS = {
     'grid': 1,
     'pv_input': 1,
     'pv_output': 1,
-    'active_input': 1
+    'active_input': 1,
+    'pv_dc_power': 1,      # reg 850 /Dc/Pv/Power, uint16, W
+    'pv_dc_current': 0.1,  # reg 851 /Dc/Pv/Current, int16, x10 -> 0.1 A
 }
 
 class VictronMonitor:
     """Main class for handling Victron Venus monitoring"""
-    
+
     def __init__(self, venus_host: str, modbus_port: int, unit_id: int):
         """Initialize VictronMonitor with connection parameters"""
         self.logger = logging.getLogger('victron')
@@ -98,6 +105,18 @@ class VictronMonitor:
             'Battery Time to Go': reg_block[6] * SCALE_FACTORS['battery_ttg']
         }
 
+    def process_dc_pv_data(self, reg_block: list) -> Dict:
+        """Process DC-coupled PV (SmartSolar / MPPT) register data.
+
+        Registers 850/851 in com.victronenergy.system are the summation of the
+        output power/current of all connected solar chargers (side batterie/DC).
+        Register 851 is signed (int16), hence the np.int16 wrap.
+        """
+        return {
+            'PV - DC-coupled power': reg_block[0] * SCALE_FACTORS['pv_dc_power'],
+            'PV - DC-coupled current': np.int16(reg_block[1]) * SCALE_FACTORS['pv_dc_current'],
+        }
+
     @staticmethod
     def create_datapoint(fields: Dict) -> Dict:
         """Create an InfluxDB datapoint with the current timestamp"""
@@ -112,7 +131,7 @@ class VictronMonitor:
 
 class InfluxDBWriter:
     """Handles InfluxDB connections and writes"""
-    
+
     def __init__(self, host: str, port: int, database: str = 'victron'):
         self.host = host
         self.port = port
@@ -148,6 +167,16 @@ async def main_loop(victron: VictronMonitor, influx_writer: InfluxDBWriter):
                 MODBUS_REGISTERS['SYSTEM_INFO']['count']
             ):
                 system_data = victron.process_system_data(system_regs)
+
+                # DC-coupled PV lives in the same system service, but outside the
+                # 800-826 block (unmapped registers in between), so read separately
+                # and merge into the system datapoint (same measurement/timestamp).
+                if dc_pv_regs := await victron.read_modbus_registers(
+                    MODBUS_REGISTERS['DC_PV_INFO']['start'],
+                    MODBUS_REGISTERS['DC_PV_INFO']['count']
+                ):
+                    system_data.update(victron.process_dc_pv_data(dc_pv_regs))
+
                 await influx_client.write(victron.create_datapoint(system_data))
 
             # Read and process battery data
@@ -189,7 +218,7 @@ if __name__ == '__main__':
     # Initialize components and start monitoring
     victron_monitor = VictronMonitor(args.venus, args.port, args.unitid)
     influx_writer = InfluxDBWriter(args.influxdb, args.influxport)
-    
+
     asyncio.get_event_loop().run_until_complete(
         main_loop(victron_monitor, influx_writer)
     )
