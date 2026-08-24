@@ -1,26 +1,38 @@
-# Use a more recent Python version for better security and features
-FROM python:3.11-alpine
+# syntax=docker/dockerfile:1
 
-LABEL maintainer="https://github.com/fidozbox-dev/VictronVenus-InfluxDB"
+##############################
+# Stage 1 — builder
+##############################
+FROM python:3.12-slim AS builder
 
-# Group ENV statements for better readability
-ENV INFLUXDB=localhost \
-    INFLUXPORT=8086 \
-    VENUS=192.168.1.112 \
-    VENUSPORT=502 \
-    UNITID=100
+# Build tools live ONLY in the builder stage. They let pip compile a wheel
+# from source if a prebuilt one is missing for the target arch (e.g. ciso8601
+# or numpy on some ARM variants). The final image carries none of this.
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends gcc build-essential \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY requirements.txt /tmp/requirements.txt
+RUN python -m venv /opt/venv \
+    && /opt/venv/bin/pip install --no-cache-dir --upgrade pip \
+    && /opt/venv/bin/pip install --no-cache-dir -r /tmp/requirements.txt
+
+##############################
+# Stage 2 — runtime
+##############################
+FROM python:3.12-slim AS runtime
+
+# Copy the ready-built virtualenv; no compilers in the final image.
+COPY --from=builder /opt/venv /opt/venv
+ENV PATH="/opt/venv/bin:$PATH" \
+    PYTHONUNBUFFERED=1
 
 WORKDIR /app
+COPY venus.py docker-entrypoint.sh ./
+RUN chmod +x docker-entrypoint.sh \
+    && adduser --disabled-password --gecos '' appuser
+USER appuser
 
-# Copy only requirements first to leverage Docker cache
-COPY requirements.txt .
-
-# Combine RUN commands and clean up in the same layer
-RUN apk add --no-cache --update alpine-sdk && \
-    pip3 install --no-cache-dir -r requirements.txt && \
-    apk del alpine-sdk
-
-# Copy application code
-COPY venus.py .
-
-CMD python3 ./venus.py --influxdb ${INFLUXDB} --influxport ${INFLUXPORT} --port ${VENUSPORT} --unitid ${UNITID} ${VENUS}
+# Configuration is passed via environment variables (see README).
+# Defaults are applied in the entrypoint.
+ENTRYPOINT ["./docker-entrypoint.sh"]
