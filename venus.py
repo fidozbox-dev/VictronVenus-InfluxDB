@@ -13,7 +13,6 @@ import datetime
 import logging
 from typing import Dict, Optional
 import asyncio
-import numpy as np
 from aiohttp import ClientConnectionError
 from pyModbusTCP.client import ModbusClient
 from aioinflux import InfluxDBClient, InfluxDBWriteError
@@ -41,6 +40,16 @@ SCALE_FACTORS = {
     'pv_dc_power': 1,      # reg 850 /Dc/Pv/Power, uint16, W
     'pv_dc_current': 0.1,  # reg 851 /Dc/Pv/Current, int16, x10 -> 0.1 A
 }
+
+
+def s16(value: int) -> int:
+    """Interpret a 16-bit Modbus register as a signed (two's complement) int.
+
+    Replaces np.int16(): numpy 2.0 raises on out-of-range Python ints instead
+    of wrapping like numpy 1.x did, so we do the conversion explicitly here.
+    """
+    return value - 0x10000 if value >= 0x8000 else value
+
 
 class VictronMonitor:
     """Main class for handling Victron Venus monitoring"""
@@ -82,9 +91,9 @@ class VictronMonitor:
             'AC Consumption L1': reg_block[17] * SCALE_FACTORS['ac_consumption'],
             'AC Consumption L2': reg_block[18] * SCALE_FACTORS['ac_consumption'],
             'AC Consumption L3': reg_block[19] * SCALE_FACTORS['ac_consumption'],
-            'Grid L1': np.int16(reg_block[20]) * SCALE_FACTORS['grid'],
-            'Grid L2': np.int16(reg_block[21]) * SCALE_FACTORS['grid'],
-            'Grid L3': np.int16(reg_block[22]) * SCALE_FACTORS['grid'],
+            'Grid L1': s16(reg_block[20]) * SCALE_FACTORS['grid'],
+            'Grid L2': s16(reg_block[21]) * SCALE_FACTORS['grid'],
+            'Grid L3': s16(reg_block[22]) * SCALE_FACTORS['grid'],
             'PV - AC-coupled on input L1': reg_block[11] * SCALE_FACTORS['pv_input'],
             'PV - AC-coupled on input L2': reg_block[12] * SCALE_FACTORS['pv_input'],
             'PV - AC-coupled on input L3': reg_block[13] * SCALE_FACTORS['pv_input'],
@@ -98,8 +107,8 @@ class VictronMonitor:
         """Process battery-related register data"""
         return {
             'Battery Voltage': reg_block[0] * SCALE_FACTORS['battery_voltage'],
-            'Battery Current': np.int16(reg_block[1]) * SCALE_FACTORS['battery_current'],
-            'Battery Power': np.int16(reg_block[2]) * SCALE_FACTORS['battery_power'],
+            'Battery Current': s16(reg_block[1]) * SCALE_FACTORS['battery_current'],
+            'Battery Power': s16(reg_block[2]) * SCALE_FACTORS['battery_power'],
             'Battery State of Charge': reg_block[3] * SCALE_FACTORS['battery_soc'],
             'Battery State': reg_block[4] * SCALE_FACTORS['battery_state'],
             'Battery Time to Go': reg_block[6] * SCALE_FACTORS['battery_ttg']
@@ -110,11 +119,11 @@ class VictronMonitor:
 
         Registers 850/851 in com.victronenergy.system are the summation of the
         output power/current of all connected solar chargers (side batterie/DC).
-        Register 851 is signed (int16), hence the np.int16 wrap.
+        Register 851 is signed, hence s16().
         """
         return {
             'PV - DC-coupled power': reg_block[0] * SCALE_FACTORS['pv_dc_power'],
-            'PV - DC-coupled current': np.int16(reg_block[1]) * SCALE_FACTORS['pv_dc_current'],
+            'PV - DC-coupled current': s16(reg_block[1]) * SCALE_FACTORS['pv_dc_current'],
         }
 
     @staticmethod
@@ -122,12 +131,11 @@ class VictronMonitor:
         """Create an InfluxDB datapoint with the current timestamp"""
         return {
             'measurement': 'Victron',
-            'tags': {'system': 1},
+            'tags': {'system': '1'},
             'fields': {k: float('%.2f' % v) for k, v in fields.items()},
-            'time': datetime.datetime.utcnow().replace(
-                tzinfo=datetime.timezone.utc
-            ).isoformat()
+            'time': datetime.datetime.now(datetime.timezone.utc).isoformat()
         }
+
 
 class InfluxDBWriter:
     """Handles InfluxDB connections and writes"""
@@ -152,6 +160,7 @@ class InfluxDBWriter:
         except ClientConnectionError as e:
             self.logger.error(f'Error during connection to InfluxDB {self.host}: {e}')
             return None
+
 
 async def main_loop(victron: VictronMonitor, influx_writer: InfluxDBWriter):
     """Main monitoring loop"""
@@ -194,6 +203,7 @@ async def main_loop(victron: VictronMonitor, influx_writer: InfluxDBWriter):
 
         await asyncio.sleep(1)
 
+
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description='Victron Venus monitoring tool')
     parser.add_argument('--influxdb', default='localhost', help='InfluxDB host')
@@ -219,6 +229,4 @@ if __name__ == '__main__':
     victron_monitor = VictronMonitor(args.venus, args.port, args.unitid)
     influx_writer = InfluxDBWriter(args.influxdb, args.influxport)
 
-    asyncio.get_event_loop().run_until_complete(
-        main_loop(victron_monitor, influx_writer)
-    )
+    asyncio.run(main_loop(victron_monitor, influx_writer))
