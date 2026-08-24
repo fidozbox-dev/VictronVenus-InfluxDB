@@ -1,0 +1,32 @@
+# docker-compose.yml — Victron -> InfluxDB collector
+#
+# This runs ONLY the collector and attaches it to the Docker network where your
+# existing InfluxDB already lives. It does NOT touch your InfluxDB / Grafana /
+# Telegraf containers or their data volumes — safest way to fold this in.
+#
+#   docker compose up -d --build
+#
+services:
+  victron:
+    build: .
+    image: fidozbox/victronvenus-influxdb:latest
+    container_name: victron-influx
+    restart: unless-stopped
+    environment:
+      # Point at the InfluxDB *container name* on the shared network below.
+      INFLUXDB: influxdb
+      INFLUXPORT: "8086"
+      # Venus GX physical device on the LAN (its static IP).
+      VENUS: "192.168.1.2"
+      VENUSPORT: "502"
+      UNITID: "100"
+      # DEBUG: "1"   # uncomment to enable -d logging
+    networks:
+      - monitoring
+
+networks:
+  # Reuse the network your InfluxDB stack already created rather than making a
+  # new one. Find its real name with:  docker network ls
+  monitoring:
+    external: true
+    name: CHANGEME-existing-network-name
